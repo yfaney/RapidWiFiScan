@@ -23,6 +23,8 @@ import java.io.OutputStream;
 public class MainActivity extends ActionBarActivity {
 
     boolean isReadyFile = false;
+    String mPackageName = null;
+    byte[] buffer = new byte[1024];
 
     EditText editTextResult;
 
@@ -31,60 +33,33 @@ public class MainActivity extends ActionBarActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         editTextResult = (EditText) findViewById(R.id.editTextResult);
+        try{
+            PackageManager m = getPackageManager();
+            String s = getPackageName();
+            PackageInfo p = m.getPackageInfo(s, 0);
+            mPackageName = p.applicationInfo.dataDir;
+        } catch (PackageManager.NameNotFoundException e) {
+            Log.d("yourtag", "Error Package name not found. Please check your system", e);
+            finish();
+        }
 
     }
 
     @Override
-    protected void onResume(){
-        super.onResume();
-        if(isReadyFile) return;
-
+    protected void onStart(){
+        super.onStart();
         new AsyncTask<Void, Process, Integer>(){
 
             @Override
             protected Integer doInBackground(Void... params) {
-                PackageManager m = getPackageManager();
-                String s = getPackageName();
                 try {
-                    PackageInfo p = m.getPackageInfo(s, 0);
-                    s = p.applicationInfo.dataDir;
-                } catch (PackageManager.NameNotFoundException e) {
-                    Log.d("yourtag", "Error Package name not found ", e);
-                }
-                AssetManager assetManager = getBaseContext().getAssets();
-                String[] files = null;
-                File backup = new File(s, "backup");
-                backup.mkdirs();
-                try {
-                    files = assetManager.list("files");
-                    for(String filename : files) {
-                        InputStream in = null;
-                        OutputStream out = null;
-                        try {
-                            in = assetManager.open("files/" + filename);
-                            File outFile = new File(s, filename);
-                            if(outFile.isDirectory()) continue;
-                            out = new FileOutputStream(outFile);
-                            copyFile(in, out);
-                            in.close();
-                            in = null;
-                            out.flush();
-                            out.close();
-                            out = null;
-                            return 0;
-                        } catch(IOException e) {
-                            Log.e("tag", "Failed to copy asset file: " + filename, e);
-                        }
-                        Process su = Runtime.getRuntime().exec("su -c 'chmod 755 ./iwlist'");
-                        InputStream is = su.getInputStream();
-                        int read;
-                        byte[] buffer = new byte[128];
-                        while((read= is.read(buffer))>0){
-                            Log.d("Process", new String(buffer));
-                        }
-                        int exitCode = su.waitFor();
-                        if(exitCode != 0) return exitCode;
+                    Process su = Runtime.getRuntime().exec("su -c pwd");
+                    InputStream is = su.getInputStream();
+                    int read;
+                    while((read= is.read(buffer))>0){
+                        Log.d("Proecss", new String(buffer));
                     }
+                    return su.waitFor();
                 } catch (IOException e) {
                     e.printStackTrace();
                 } catch (InterruptedException e) {
@@ -95,10 +70,78 @@ public class MainActivity extends ActionBarActivity {
 
             @Override
             public void onPostExecute(Integer result){
+                Log.d("Process", "SU returns code :" + Integer.toString(result));
+                if(result == 0){
+                    Toast.makeText(getBaseContext(), "Root Permission Allowed.", Toast.LENGTH_SHORT).show();
+                    readyFile();
+                }else{
+                    Toast.makeText(getBaseContext(), "This app needs a root permission.", Toast.LENGTH_SHORT).show();
+                    finish();
+                }
+            }
+        }.execute();
+    }
+
+    public void onReadyClicked(View v){
+        readyFile();
+    }
+
+    protected void readyFile(){
+        super.onResume();
+        if(isReadyFile) return;
+
+        new AsyncTask<Void, Process, Integer>(){
+
+            @Override
+            protected Integer doInBackground(Void... params) {
+                try {
+                    AssetManager assetManager = getBaseContext().getAssets();
+                    String[] files = null;
+                    files = assetManager.list("files");
+                    for(String filename : files) {
+                        InputStream in = null;
+                        OutputStream out = null;
+                        try {
+                            in = assetManager.open("files/" + filename);
+                            File outFile = new File(mPackageName, filename);
+                            if(outFile.isDirectory()) continue;
+                            out = new FileOutputStream(outFile);
+                            copyFile(in, out);
+                            in.close();
+                            in = null;
+                            out.flush();
+                            out.close();
+                            out = null;
+                        } catch(IOException e) {
+                            Log.e("tag", "Failed to copy asset file: " + filename, e);
+                        }
+                    }
+                    String[] cmd = {"su", "-c", "chmod 755 " + mPackageName + "/" + "iwlist"};
+                    printCmdLine(cmd);
+                    Process su = Runtime.getRuntime().exec(cmd);
+                    InputStream is = su.getInputStream();
+                    int read;
+                    while((read= is.read(buffer))>0){
+                        Log.d("Process", new String(buffer));
+                    }
+                    int exitCode = su.waitFor();
+                    return exitCode;
+                } catch (IOException e) {
+                    e.printStackTrace();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                return -1;
+            }
+
+            @Override
+            public void onPostExecute(Integer result){
+                Log.d("Process", "Returns: " + Integer.toString(result));
                 if(result ==0){
                     isReadyFile = true;
-                }
-                else{
+                }else if (result == 127) {
+                    Toast.makeText(getBaseContext(), "SU returns Command Not Found: " + Integer.toString(result), Toast.LENGTH_SHORT).show();
+                }else{
                     Toast.makeText(getBaseContext(), "Oh, something wrong: " + Integer.toString(result), Toast.LENGTH_SHORT).show();
                 }
             }
@@ -129,6 +172,7 @@ public class MainActivity extends ActionBarActivity {
     }
 
     public void onScanClicked(View view){
+        editTextResult.setText("");
         if(!isReadyFile){
             Toast.makeText(this, "Please click ReadyFile first.", Toast.LENGTH_SHORT).show();
             return;
@@ -138,10 +182,11 @@ public class MainActivity extends ActionBarActivity {
             @Override
             protected String doInBackground(Void... params) {
                 try {
-                    Process su = Runtime.getRuntime().exec("su -c './iwlist wlan0 scanning' | sed -n '/Address:/p/Channel:/p/ESSID/p/Last beacon/p'");
+                    String[] cmd = {"su", "-c", mPackageName + "/" + "iwlist wlan0 scanning | sed -n '/Address:/p/Channel:/p/ESSID/p/Last beacon/p'"};
+                    printCmdLine(cmd);
+                    Process su = Runtime.getRuntime().exec(cmd);
                     InputStream is = su.getInputStream();
                     int read;
-                    byte[] buffer = new byte[512];
                     StringBuffer lBuffer = new StringBuffer();
                     while((read= is.read(buffer))>0){
                         String bf = new String(buffer);
@@ -163,6 +208,7 @@ public class MainActivity extends ActionBarActivity {
             public void onPostExecute(String result){
                 if(result != null){
                     Toast.makeText(getBaseContext(), "Root Permission Allowed.", Toast.LENGTH_SHORT).show();
+                    editTextResult.setText(result);
                 }else{
                     Toast.makeText(getBaseContext(), "This app needs a root permission.", Toast.LENGTH_SHORT).show();
                 }
@@ -176,5 +222,12 @@ public class MainActivity extends ActionBarActivity {
         while ((read = in.read(buffer)) != -1) {
             out.write(buffer, 0, read);
         }
+    }
+    private static void printCmdLine(String[] cmds){
+        String cmdLine = "";
+        for(String c : cmds){
+            cmdLine = cmdLine + " " + c;
+        }
+        Log.d("Running", cmdLine);
     }
 }
